@@ -900,7 +900,12 @@ class Interface:
                     future = asyncio.run_coroutine_threadsafe(self.social.converse(text), self.loop)
                     resp = future.result(timeout=config_manager.config.model_timeout)
                 except Exception as exc:  # noqa: BLE001
-                    resp = f"[警告] 对话生成失败：{exc}"
+                    logger.log(f"[警告] 异步对话失败，尝试同步兜底：{exc}")
+                    try:
+                        # 界面线程已隔离，直接同步调用可避免事件循环异常导致的无响应
+                        resp = self.model.generate(f"请以礼貌简洁的方式回复：{text}")
+                    except Exception as inner:  # noqa: BLE001
+                        resp = f"[警告] 对话生成失败：{inner}"
                 signals.chat_done.emit(text, resp)
 
             threading.Thread(target=worker, daemon=True).start()
@@ -915,7 +920,11 @@ class Interface:
                     plan_future = asyncio.run_coroutine_threadsafe(self.evolution.draft_upgrade(target), self.loop)
                     plan = plan_future.result(timeout=config_manager.config.model_timeout)
                 except Exception as exc:  # noqa: BLE001
-                    plan = f"[警告] 升级思路生成失败：{exc}"
+                    logger.log(f"[警告] 异步升级思路生成失败，尝试同步兜底：{exc}")
+                    try:
+                        plan = self.model.generate(f"请为 {target} 提供升级思路，简要列出步骤。")
+                    except Exception as inner:  # noqa: BLE001
+                        plan = f"[警告] 升级思路生成失败：{inner}"
                 try:
                     code = self.evolution.materialize_code(target)
                 except Exception as exc:  # noqa: BLE001
