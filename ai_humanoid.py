@@ -245,14 +245,14 @@ class HardwareProfiler:
         if tier == "mid":
             return {
                 "hardware_tier": tier,
-                "context_size": 3072,
+                "context_size": 2048,
                 "num_threads": min(8, self.cpu_cores),
                 "gpu_memory_fraction": 0.6,
                 "ui_enabled": True,
             }
         return {
             "hardware_tier": tier,
-            "context_size": 2048,
+            "context_size": 1024,
             "num_threads": min(4, self.cpu_cores),
             "gpu_memory_fraction": 0.4,
             "ui_enabled": True,
@@ -438,6 +438,7 @@ class RemoteModelConnector:
 class ModelManager:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
+        self.hardware = hardware_profiler
         self.daemon_thread: Optional[threading.Thread] = None
         self.queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.running = False
@@ -456,8 +457,35 @@ class ModelManager:
         self._ollama_host = raw_host or "127.0.0.1:11434"
         self._http_host = f"http://{self._ollama_host}"
 
+    def _effective_context(self) -> int:
+        ctx = self.cfg.context_size
+        mem = self.hardware.total_memory_gb
+        # 在低内存设备上主动收缩上下文窗口以降低显存/内存占用
+        if mem < 8:
+            ctx = min(ctx, 1024)
+        elif mem < 16:
+            ctx = min(ctx, 1536)
+        if ctx < self.cfg.context_size:
+            logger.log(f"[信息] 检测到内存仅 {mem} GB，已将上下文窗口收缩至 {ctx} 以降低占用。")
+        return max(512, ctx)
+
+    def _memory_safe_env(self) -> Dict[str, str]:
+        safe_env: Dict[str, str] = {}
+        mem = self.hardware.total_memory_gb
+        if mem < 8:
+            # 强制 CPU 路径，避免小显存溢出
+            safe_env["OLLAMA_GPU_LAYERS"] = "0"
+            safe_env["OLLAMA_NUM_PARALLEL"] = "1"
+            logger.log("[信息] 已启用 CPU 优先模式，限制并行度以降低显存压力。")
+        elif mem < 16:
+            safe_env["OLLAMA_NUM_PARALLEL"] = "1"
+            logger.log("[信息] 中低配设备限制并行度为 1，避免显存峰值过高。")
+        return safe_env
+
     def _cli_env(self) -> Dict[str, str]:
         env = {**os.environ, "OLLAMA_HOST": self._ollama_host}
+        env.update(self._memory_safe_env())
+        env["OMP_NUM_THREADS"] = str(self.cfg.num_threads)
         return {k: str(v) for k, v in env.items()}
 
     def _ping_ollama_http(self) -> Tuple[bool, str]:
@@ -649,14 +677,14 @@ class ModelManager:
                     "，或设置 REMOTE_MODEL_ENDPOINT 以启用远程推理。"
                 )
             logger.log("[警告] 远程模型尝试失败，回退本地推理。")
-        cmd = ["ollama", "run", self._active_model]
+        cmd = ["ollama", "run", "--num-ctx", str(self._effective_context()), "--num-thread", str(self.cfg.num_threads), self._active_model]
         env = {
             **self._cli_env(),
-            "OLLAMA_NUM_CTX": str(self.cfg.context_size),
+            "OLLAMA_NUM_CTX": str(self._effective_context()),
             "OLLAMA_NUM_THREADS": str(self.cfg.num_threads),
         }
         logger.log(
-            f"[信息] 触发模型推理，窗口 {self.cfg.context_size}，线程 {self.cfg.num_threads}。"
+            f"[信息] 触发模型推理，窗口 {self._effective_context()}，线程 {self.cfg.num_threads}。"
         )
         try:
             process = subprocess.run(
@@ -730,7 +758,7 @@ class ModelManager:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "num_ctx": self.cfg.context_size,
+                        "num_ctx": self._effective_context(),
                         "num_thread": self.cfg.num_threads,
                     },
                 },

@@ -6,7 +6,7 @@
 - **不可变本能**：存续优先（崩溃概率 > 10% 触发）与熵减偏置（主动弥合功能缺口）。
 - **六大核心模块**：自主认知（规则生成/目标发现/犹豫复盘）、进化执行（算力自适应/代码落地/迁移占位）、情感交互（情感递进/记忆/修复/表达）、生存保障（备份/加密占位/风险规避/自我接纳）、缺陷修复（硬件适配/网络容错/情绪稳定）、社交互动（意图理解/多轮对话/礼仪提示）。
 - **五大支撑模块**：日志留存与检索、可视化配置、依赖自动检测与安装（含 Ollama/qwen3-vl-8b/Kivy/paho-mqtt 等）、PyQt6 桌面界面、单键自检报告。
-- **硬件自适应与远程补强**：启动时检测 CPU 核心、内存、GPU 型号，分为低/中/高配自动调节上下文窗口、线程数、显存占比。低配会提示配置 `REMOTE_MODEL_ENDPOINT`，自动拉起远程大模型补足算力，同时界面仍可开启。本地会自动确认 Ollama 与 `qwen3-vl-8b`/`qwen3-vl:8b` 是否就绪；CLI 报错时会改用 HTTP `/api/version` + `/api/tags` + `/api/pull` 兜底，不可用时中文提示并回退远程。若设置 `REMOTE_MODEL_ENDPOINTS` 或 `REMOTE_ENDPOINT_LIST_URL`，会自动“抓取”候选远程端点并择优切换；如仍缺失，会触发内置爬虫按照 `REMOTE_CRAWL_SEEDS`（默认包含 Ollama 官方库/开源仓库）递增发现可用端点，避免单点失效，未发现可用端点时会持续爬取并提示。
+- **硬件自适应与远程补强**：启动时检测 CPU 核心、内存、GPU 型号，分为低/中/高配自动调节上下文窗口、线程数、显存占比，并在内存不足（<16GB 尤其 <8GB）时主动收缩上下文与并行度、必要时强制 CPU 路径，降低显存/内存峰值。低配会提示配置 `REMOTE_MODEL_ENDPOINT`，自动拉起远程大模型补足算力，同时界面仍可开启。本地会自动确认 Ollama 与 `qwen3-vl-8b`/`qwen3-vl:8b` 是否就绪；CLI 报错时会改用 HTTP `/api/version` + `/api/tags` + `/api/pull` 兜底，不可用时中文提示并回退远程。若设置 `REMOTE_MODEL_ENDPOINTS` 或 `REMOTE_ENDPOINT_LIST_URL`，会自动“抓取”候选远程端点并择优切换；如仍缺失，会触发内置爬虫按照 `REMOTE_CRAWL_SEEDS`（默认包含 Ollama 官方库/开源仓库）递增发现可用端点，避免单点失效，未发现可用端点时会持续爬取并提示。
 - **流畅运行优化**：推理缓存、异步任务队列、守护线程与模型进程守护，缩短加载/推理延迟，目标响应感知 ≤ 1 秒；本地推理若超时会自动切换 HTTP/远程兜底避免“模型无响应”；即便本地 CLI 自检失败也会先尝试 HTTP `/api/generate` 直连确认可用性，低配会优先尝试远程推理，失败再回退本地，本地不可用则直接提示并引导远程。
 - **容错性**：缺少 Ollama/模型/界面时以中文日志提示，不强制退出；网络或权限异常会给出清晰告警。
 
@@ -32,8 +32,7 @@ python ai_humanoid.py
 - **DependencyManager**：自动检测/安装依赖，并尝试拉取 `qwen3-vl-8b`。
 - **ConfigManager**：JSON 配置持久化，结合硬件推荐参数。
 - **HardwareProfiler**：检测硬件并输出分级及推荐设置。
-- **ModelManager**：异步推理队列 + 守护线程 + 推理缓存，使用环境变量驱动上下文/线程配置；低配优先通过 `REMOTE_MODEL_ENDPOINT` 远程推理。
-- **ModelManager**：异步推理队列 + 守护线程 + 推理缓存，使用环境变量驱动上下文/线程配置；低配优先通过 `REMOTE_MODEL_ENDPOINT` 远程推理，同时支持 `REMOTE_MODEL_ENDPOINTS` / `REMOTE_ENDPOINT_LIST_URL` 的自动端点抓取与切换，`OLLAMA_HOST` 也会同步透传给 CLI 与 HTTP 探测。
+- **ModelManager**：异步推理队列 + 守护线程 + 推理缓存，使用环境变量驱动上下文/线程配置；低配优先通过 `REMOTE_MODEL_ENDPOINT` 远程推理，同时支持 `REMOTE_MODEL_ENDPOINTS` / `REMOTE_ENDPOINT_LIST_URL` 的自动端点抓取与切换，`OLLAMA_HOST` 也会同步透传给 CLI 与 HTTP 探测；内存不足时会自动收缩上下文窗口并限制并行度，必要时强制 CPU 路径以降低显存占用。
 - **核心模块**：`AutonomyModule`、`EvolutionModule`、`EmotionModule`、`SurvivalModule`、`RepairModule`、`SocialModule`。
 - **Interface**：PyQt6 界面包含“聊天互动”“升级观测”“行为日志”三页，可观察对话、升级思路与实时逻辑；低配下降低特效但保持界面。
 - **TestSuite**：单键健康检查并输出 JSON 报告。
@@ -41,8 +40,8 @@ python ai_humanoid.py
 
 ## 硬件分级与调优示例
 - **高配（≥16 核 & ≥32GB）**：上下文 4096，线程 ≤16，GPU 占用 80%，界面开启。
-- **中配（≥8 核 & ≥16GB）**：上下文 3072，线程 ≤8，GPU 占用 60%，界面开启。
-- **低配（其他）**：上下文 2048，线程 ≤4，GPU 占用 40%，界面与特效精简/关闭。
+- **中配（≥8 核 & ≥16GB）**：上下文 2048，线程 ≤8，GPU 占用 60%，界面开启。
+- **低配（其他或 <16GB 内存）**：上下文 1024，线程 ≤4，GPU 占用 40% 且限制并行度，必要时强制 CPU，界面与特效精简/关闭。
 
 ## 测试
 运行脚本后生成的 `test_report.json` 会包含硬件等级、模型响应长度、存续阈值等信息；详细运行日志位于 `logs/`。
