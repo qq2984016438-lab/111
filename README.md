@@ -6,13 +6,13 @@
 - **不可变本能**：存续优先（崩溃概率 > 10% 触发）与熵减偏置（主动弥合功能缺口）。
 - **六大核心模块**：自主认知（规则生成/目标发现/犹豫复盘）、进化执行（算力自适应/代码落地/迁移占位）、情感交互（情感递进/记忆/修复/表达）、生存保障（备份/加密占位/风险规避/自我接纳）、缺陷修复（硬件适配/网络容错/情绪稳定）、社交互动（意图理解/多轮对话/礼仪提示）。
 - **五大支撑模块**：日志留存与检索、可视化配置、依赖自动检测与安装（含 Ollama/qwen3-vl-8b/Kivy/paho-mqtt 等）、PyQt6 桌面界面、单键自检报告。
-- **硬件自适应与远程补强**：启动时检测 CPU 核心、内存、GPU 型号，分为低/中/高配自动调节上下文窗口、线程数、显存占比。低配会提示配置 `REMOTE_MODEL_ENDPOINT`，自动拉起远程大模型补足算力，同时界面仍可开启。本地会自动确认 Ollama 与 `qwen3-vl-8b` 是否就绪；CLI 报错时会改用 HTTP `/api/version` + `/api/tags` + `/api/pull` 兜底，不可用时中文提示并回退远程。若设置 `REMOTE_MODEL_ENDPOINTS` 或 `REMOTE_ENDPOINT_LIST_URL`，会自动“抓取”候选远程端点并择优切换，避免单点失效。
+- **硬件自适应与远程补强**：启动时检测 CPU 核心、内存、GPU 型号，分为低/中/高配自动调节上下文窗口、线程数、显存占比。低配会提示配置 `REMOTE_MODEL_ENDPOINT`，自动拉起远程大模型补足算力，同时界面仍可开启。本地会自动确认 Ollama 与 `qwen3-vl-8b`/`qwen3-vl:8b` 是否就绪；CLI 报错时会改用 HTTP `/api/version` + `/api/tags` + `/api/pull` 兜底，不可用时中文提示并回退远程。若设置 `REMOTE_MODEL_ENDPOINTS` 或 `REMOTE_ENDPOINT_LIST_URL`，会自动“抓取”候选远程端点并择优切换；如仍缺失，会触发内置爬虫按照 `REMOTE_CRAWL_SEEDS`（默认包含 Ollama 官方库/开源仓库）递增发现可用端点，避免单点失效。
 - **流畅运行优化**：推理缓存、异步任务队列、守护线程与模型进程守护，缩短加载/推理延迟，目标响应感知 ≤ 1 秒；低配会优先尝试远程推理，失败再回退本地，本地不可用则直接提示并引导远程。
 - **容错性**：缺少 Ollama/模型/界面时以中文日志提示，不强制退出；网络或权限异常会给出清晰告警。
 
 ## 运行要求
 - **Python**：3.11
-- **运行时**：已安装 [Ollama](https://ollama.ai) 且可调用本地模型 `qwen3-vl-8b`；若暂未安装，可通过 `REMOTE_MODEL_ENDPOINT` 提供远程推理端点兜底。脚本会检测 CLI 是否存在并自动尝试拉取模型，CLI 失败时会使用 HTTP 方式检测/拉取（支持自定义 `OLLAMA_HOST`，即使包含 http:// 也会自动拆分为 CLI 可用的 host:port），仍失败则给出中文原因并提示远程端点方案；如提供 `REMOTE_MODEL_ENDPOINTS`（用逗号分隔）或 `REMOTE_ENDPOINT_LIST_URL`（返回端点列表的文本 URL），会自动探测并切换可用的远程大模型；当 CLI 推理异常时还会自动通过 HTTP `/api/generate` 兜底调用。
+- **运行时**：已安装 [Ollama](https://ollama.ai) 且可调用本地模型 `qwen3-vl-8b`/`qwen3-vl:8b`；若暂未安装，可通过 `REMOTE_MODEL_ENDPOINT` 提供远程推理端点兜底。脚本会检测 CLI 是否存在并自动尝试拉取模型，CLI 失败时会使用 HTTP 方式检测/拉取（支持自定义 `OLLAMA_HOST`，即使包含 http:// 也会自动拆分为 CLI 可用的 host:port），仍失败则给出中文原因并提示远程端点方案；如提供 `REMOTE_MODEL_ENDPOINTS`（用逗号分隔）或 `REMOTE_ENDPOINT_LIST_URL`（返回端点列表的文本 URL），会自动探测并切换可用的远程大模型；如仍无可用端点，将触发爬虫抓取 `REMOTE_CRAWL_SEEDS` 中的页面以挖掘 API 地址，并再次探测；当 CLI 推理异常时还会自动通过 HTTP `/api/generate` 兜底调用。
 - **Python 依赖**：`PyQt6`、`paho-mqtt`、`requests`，可选 `psutil`、`kivy`。脚本会在首次运行时尝试自动安装缺失依赖。
 - **系统**：Windows / Linux（确保 `ollama` 在 PATH 中；GPU 探测在有 `nvidia-smi` 时更准确）。
 

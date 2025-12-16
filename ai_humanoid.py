@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,7 @@ class DependencyManager:
     REQUIRED_PY = ["PyQt6", "paho-mqtt", "requests"]
     OPTIONAL_PY = ["psutil", "kivy"]
     OLLAMA_MODEL = "qwen3-vl-8b"
+    OLLAMA_MODEL_ALIASES = ["qwen3-vl-8b", "qwen3-vl:8b", "qwen3-vl8b"]
 
     def __init__(self, auto_install: bool = True) -> None:
         self.auto_install = auto_install
@@ -108,13 +110,17 @@ class DependencyManager:
     def _ensure_model(self) -> None:
         try:
             result = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=True)
-            if self.OLLAMA_MODEL not in result.stdout:
-                logger.log(f"[信息] 正在拉取本地模型 {self.OLLAMA_MODEL} ...")
-                pull = subprocess.run(["ollama", "pull", self.OLLAMA_MODEL], capture_output=True, text=True, check=False)
-                if pull.returncode != 0:
-                    logger.log(f"[警告] 拉取模型 {self.OLLAMA_MODEL} 失败：{pull.stderr.strip()}")
-                else:
-                    logger.log(f"[信息] 模型 {self.OLLAMA_MODEL} 已就绪或已缓存。")
+            if not any(alias in result.stdout for alias in self.OLLAMA_MODEL_ALIASES):
+                for alias in self.OLLAMA_MODEL_ALIASES:
+                    logger.log(f"[信息] 正在尝试拉取本地模型 {alias} ...")
+                    pull = subprocess.run(
+                        ["ollama", "pull", alias], capture_output=True, text=True, check=False
+                    )
+                    if pull.returncode == 0:
+                        logger.log(f"[信息] 模型 {alias} 已就绪或已缓存。")
+                        return
+                    logger.log(f"[警告] 拉取模型 {alias} 失败：{pull.stderr.strip()}")
+                logger.log("[警告] 所有模型别名均拉取失败，请手动执行 ollama pull qwen3-vl-8b 或 qwen3-vl:8b。")
         except Exception as exc:  # noqa: BLE001
             logger.log(f"[警告] 无法验证 Ollama 模型可用性：{exc}")
 
@@ -256,6 +262,11 @@ class RemoteModelConnector:
         self.discovery_url = os.environ.get("REMOTE_ENDPOINT_LIST_URL", "")
         backups = os.environ.get("REMOTE_MODEL_ENDPOINTS", "")
         self.backup_endpoints = [e.strip() for e in backups.split(",") if e.strip()]
+        crawl_seeds = os.environ.get(
+            "REMOTE_CRAWL_SEEDS", "https://ollama.ai/library,https://github.com/ollama/ollama"
+        )
+        self.crawl_seeds = [e.strip() for e in crawl_seeds.split(",") if e.strip()]
+        self._seen_candidates: set[str] = set(self.backup_endpoints)
         self.session = None
         if util.find_spec("requests"):
             self.session = import_module("requests")  # type: ignore
@@ -265,6 +276,20 @@ class RemoteModelConnector:
             return False
         if not self.endpoint:
             self.auto_discover()
+        if not self.endpoint and self.backup_endpoints:
+            for candidate in self.backup_endpoints:
+                if candidate in self._seen_candidates and self._probe(candidate):
+                    self.endpoint = candidate
+                    logger.log(f"[信息] 已切换远程端点：{candidate}")
+                    break
+        if not self.endpoint:
+            self.crawl_public_endpoints()
+        if not self.endpoint and self.backup_endpoints:
+            for candidate in self.backup_endpoints:
+                if candidate in self._seen_candidates and self._probe(candidate):
+                    self.endpoint = candidate
+                    logger.log(f"[信息] 已切换远程端点：{candidate}")
+                    break
         return bool(self.endpoint)
 
     def auto_discover(self) -> None:
@@ -289,6 +314,32 @@ class RemoteModelConnector:
                     self.endpoint = candidate
                     logger.log(f"[信息] 已自动切换远程端点：{candidate}")
                     break
+
+    def crawl_public_endpoints(self) -> None:
+        """通过爬虫抓取页面中的 API 端点，避免单点失效。"""
+        if self.session is None:
+            return
+        for seed in self.crawl_seeds:
+            if not seed or seed in self._seen_candidates:
+                continue
+            try:
+                logger.log(f"[信息] 正在爬取远程端点来源：{seed}")
+                resp = self.session.get(seed, timeout=10)
+                if resp.status_code >= 500:
+                    logger.log(f"[警告] 爬取 {seed} 失败：HTTP{resp.status_code}")
+                    continue
+                urls = re.findall(r"https?://[^\s\"']+", resp.text)
+                filtered = [u for u in urls if any(key in u.lower() for key in ("api", "chat", "infer", "model", "v1"))]
+                new_candidates = [u for u in filtered if u not in self._seen_candidates]
+                for cand in new_candidates:
+                    if len(self.backup_endpoints) > 50:
+                        break
+                    self._seen_candidates.add(cand)
+                    self.backup_endpoints.append(cand)
+                if new_candidates:
+                    logger.log(f"[信息] 爬虫新增 {len(new_candidates)} 个候选端点，将逐一探测...")
+            except Exception as exc:  # noqa: BLE001
+                logger.log(f"[警告] 爬虫获取远程端点异常：{exc}")
 
     def _probe(self, url: str) -> bool:
         if self.session is None:
@@ -323,9 +374,13 @@ class RemoteModelConnector:
                 logger.log(f"[警告] 远程模型响应异常：HTTP {resp.status_code}")
             except Exception as exc:  # noqa: BLE001
                 logger.log(f"[警告] 远程模型尝试失败：{exc}，继续重试...")
-                if attempt == retries and self.backup_endpoints:
+                if attempt == retries:
                     self.endpoint = ""
                     self.auto_discover()
+                    if not self.endpoint:
+                        self.crawl_public_endpoints()
+                        self.auto_discover()
+        return None
         return None
 
 
@@ -338,6 +393,8 @@ class ModelManager:
         self.running = False
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.remote = RemoteModelConnector(cfg.remote_endpoint)
+        self._model_candidates = DependencyManager.OLLAMA_MODEL_ALIASES
+        self._active_model = self._model_candidates[0]
         self._local_check_passed = False
         self._local_last_error: Optional[str] = None
         raw_host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip().rstrip("/")
@@ -365,21 +422,26 @@ class ModelManager:
 
         try:
             tags = requests_mod.get(f"{self._http_host}/api/tags", timeout=8)
-            if tags.status_code == 200 and DependencyManager.OLLAMA_MODEL in tags.text:
-                return True, "HTTP 确认模型已存在"
+            if tags.status_code == 200:
+                for alias in self._model_candidates:
+                    if alias in tags.text:
+                        self._active_model = alias
+                        return True, f"HTTP 确认模型已存在：{alias}"
         except Exception:
             pass
 
         try:
             logger.log("[信息] 通过 HTTP 触发模型拉取...")
-            pull_resp = requests_mod.post(
-                f"{self._http_host}/api/pull",
-                json={"name": DependencyManager.OLLAMA_MODEL},
-                timeout=30,
-            )
-            if pull_resp.status_code == 200:
-                return True, "HTTP 拉取请求已提交"
-            return False, f"HTTP 拉取返回 {pull_resp.status_code}"
+            for alias in self._model_candidates:
+                pull_resp = requests_mod.post(
+                    f"{self._http_host}/api/pull",
+                    json={"name": alias},
+                    timeout=30,
+                )
+                if pull_resp.status_code == 200:
+                    self._active_model = alias
+                    return True, f"HTTP 拉取请求已提交：{alias}"
+            return False, "HTTP 拉取请求全部失败"
         except Exception as exc:  # noqa: BLE001
             return False, f"HTTP 拉取异常：{exc}"
 
@@ -395,19 +457,30 @@ class ModelManager:
             result = subprocess.run(
                 ["ollama", "list"], capture_output=True, text=True, check=True, env=self._cli_env(), timeout=20
             )
-            if DependencyManager.OLLAMA_MODEL not in result.stdout:
-                self._local_last_error = "本地缺少 qwen3-vl-8b 模型"
-                logger.log("[警告] 本地尚未拉取 qwen3-vl-8b，尝试自动拉取...")
-                pull = subprocess.run(
-                    ["ollama", "pull", DependencyManager.OLLAMA_MODEL],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=self._cli_env(),
-                    timeout=120,
-                )
-                if pull.returncode != 0:
-                    logger.log(f"[错误] 自动拉取失败：{pull.stderr.strip()}")
+            if not any(alias in result.stdout for alias in self._model_candidates):
+                self._local_last_error = "本地缺少 qwen3-vl 系列模型"
+                logger.log("[警告] 本地尚未拉取 qwen3-vl-8b/ qwen3-vl:8b，尝试自动拉取...")
+                pulled_ok = False
+                for alias in self._model_candidates:
+                    pull = subprocess.run(
+                        ["ollama", "pull", alias],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=self._cli_env(),
+                        timeout=120,
+                    )
+                    if pull.returncode == 0:
+                        self._active_model = alias
+                        logger.log(f"[信息] 模型 {alias} 已可用。")
+                        pulled_ok = True
+                        break
+                    logger.log(f"[警告] 拉取 {alias} 失败：{pull.stderr.strip()}")
+                if pulled_ok:
+                    result = subprocess.run(
+                        ["ollama", "list"], capture_output=True, text=True, check=False, env=self._cli_env(), timeout=30
+                    )
+                if not any(alias in result.stdout for alias in self._model_candidates):
                     ok, reason = self._ping_ollama_http()
                     if ok:
                         logger.log(f"[信息] HTTP 拉取/确认成功：{reason}")
@@ -416,6 +489,11 @@ class ModelManager:
                         return True
                     logger.log(f"[警告] 本地模型仍未就绪：{reason}")
                     return False
+            else:
+                for alias in self._model_candidates:
+                    if alias in result.stdout:
+                        self._active_model = alias
+                        break
             self._local_check_passed = True
             self._local_last_error = None
             logger.log("[信息] 本地 Ollama 已确认可用。")
@@ -490,7 +568,7 @@ class ModelManager:
                     "，或设置 REMOTE_MODEL_ENDPOINT 以启用远程推理。"
                 )
             logger.log("[警告] 远程模型尝试失败，回退本地推理。")
-        cmd = ["ollama", "run", DependencyManager.OLLAMA_MODEL]
+        cmd = ["ollama", "run", self._active_model]
         env = {
             **self._cli_env(),
             "OLLAMA_NUM_CTX": str(self.cfg.context_size),
@@ -545,7 +623,7 @@ class ModelManager:
             resp = requests_mod.post(
                 f"{self._http_host}/api/generate",
                 json={
-                    "model": DependencyManager.OLLAMA_MODEL,
+                    "model": self._active_model,
                     "prompt": prompt,
                     "stream": False,
                     "options": {
