@@ -1022,8 +1022,6 @@ def main() -> None:
         await autonomy.discover_goals("初始化准备")
         await social.understand_intent("你好")
 
-    loop.run_until_complete(bootstrap())
-
     def loop_runner(evt_loop: asyncio.AbstractEventLoop) -> None:
         asyncio.set_event_loop(evt_loop)
         evt_loop.run_forever()
@@ -1031,8 +1029,14 @@ def main() -> None:
     loop_thread = threading.Thread(target=loop_runner, args=(loop,), daemon=True)
     loop_thread.start()
 
-    tests = TestSuite(model_manager, hardware_profiler)
-    tests.run()
+    # 将启动引导与健康检查放入异步/后台线程，避免阻塞界面弹出
+    loop.call_soon_threadsafe(asyncio.create_task, bootstrap())
+
+    def run_tests() -> None:
+        tests = TestSuite(model_manager, hardware_profiler)
+        tests.run()
+
+    threading.Thread(target=run_tests, daemon=True).start()
 
     if config_manager.config.ui_enabled:
         ui = Interface(emotion, model_manager, evolution, social, loop)
