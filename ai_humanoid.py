@@ -72,6 +72,7 @@ class DependencyManager:
 
     def __init__(self, auto_install: bool = True) -> None:
         self.auto_install = auto_install
+        self._pyqt_checked = False
 
     def ensure(self) -> Dict[str, bool]:
         status: Dict[str, bool] = {}
@@ -83,6 +84,19 @@ class DependencyManager:
         else:
             self._ensure_model()
         return status
+
+    def ensure_pyqt(self) -> bool:
+        """确保 PyQt6 可用，不可用时重试安装一次。"""
+        if self._pyqt_checked:
+            return util.find_spec("PyQt6") is not None
+        self._pyqt_checked = True
+        if util.find_spec("PyQt6") is not None:
+            return True
+        logger.log("[警告] 未检测到 PyQt6，尝试自动安装以启用窗口界面……")
+        ok = self._check_and_install("PyQt6")
+        if not ok:
+            logger.log("[错误] PyQt6 安装失败，界面将被禁用，可手动安装后重启。")
+        return ok
 
     def _check_and_install(self, pkg: str) -> bool:
         module_name = pkg.replace("-", "_")
@@ -771,10 +785,19 @@ class Interface:
 
     def start(self) -> None:
         if util.find_spec("PyQt6") is None:
-            logger.log("[警告] 未安装 PyQt6，界面功能已禁用。")
+            logger.log("[警告] 未检测到 PyQt6，正在尝试补装以恢复窗口界面……")
+            dm = DependencyManager(auto_install=True)
+            if not dm.ensure_pyqt():
+                logger.log("[错误] 窗口依赖不可用，已进入无界面模式。")
+                return
+
+        try:
+            from PyQt6 import QtWidgets, QtGui  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            logger.log(f"[错误] 加载 PyQt6 失败：{exc}，已切换无界面模式。")
             return
 
-        from PyQt6 import QtWidgets, QtGui
+        logger.log("[信息] 正在启动可视化窗口，请稍候……")
 
         app = QtWidgets.QApplication(sys.argv)
         window = QtWidgets.QWidget()
@@ -947,6 +970,7 @@ class RemoteUpgradeWatcher:
 def main() -> None:
     dm = DependencyManager(auto_install=True)
     dm.ensure()
+    dm.ensure_pyqt()
 
     tier_params = hardware_profiler.recommended_params()
     config_manager.update(**tier_params)
