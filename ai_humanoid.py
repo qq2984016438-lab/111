@@ -794,7 +794,7 @@ class Interface:
             logger.log("[警告] 当前无可用图形显示（缺少 DISPLAY 环境变量），窗口可能无法弹出，建议在图形桌面下运行。")
 
         try:
-            from PyQt6 import QtWidgets, QtGui  # type: ignore
+            from PyQt6 import QtWidgets, QtGui, QtCore  # type: ignore
         except Exception as exc:  # noqa: BLE001
             logger.log(f"[错误] 加载 PyQt6 失败：{exc}，已切换无界面模式。")
             return
@@ -865,31 +865,63 @@ class Interface:
         layout.addWidget(tabs)
         window.setLayout(layout)
 
+        class UiSignals(QtCore.QObject):
+            chat_done = QtCore.pyqtSignal(str, str)
+            upgrade_done = QtCore.pyqtSignal(str, str, str)
+
+        signals = UiSignals()
+
+        def on_chat_done(user_text: str, resp: str) -> None:
+            chat_output.append(f"你：{user_text}\nAI：{resp}\n")
+            behavior_view.append(f"[对话] 用户输入：{user_text}")
+            mood = self.emotion.step("成功")
+            emotion_label.setText(f"情绪：{mood}")
+            status_label.setText("状态：空闲")
+            input_box.clear()
+
+        def on_upgrade_done(target: str, plan: str, code: str) -> None:
+            upgrade_output.append(f"[思考] {plan}\n[代码草案]\n{code}\n")
+            behavior_view.append(f"[升级] 目标：{target} | 已生成思路与代码草案")
+            status_label.setText("状态：空闲")
+
+        signals.chat_done.connect(on_chat_done)  # type: ignore
+        signals.upgrade_done.connect(on_upgrade_done)  # type: ignore
+
         def send_message() -> None:
             text = input_box.text().strip()
             if not text:
                 return
             status_label.setText("状态：思考中...")
             QtWidgets.QApplication.processEvents()
-            future = asyncio.run_coroutine_threadsafe(self.social.converse(text), self.loop)
-            resp = future.result()
-            chat_output.append(f"你：{text}\nAI：{resp}\n")
-            behavior_view.append(f"[对话] 用户输入：{text}")
-            mood = self.emotion.step("成功")
-            emotion_label.setText(f"情绪：{mood}")
-            status_label.setText("状态：空闲")
-            input_box.clear()
+
+            def worker() -> None:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.social.converse(text), self.loop)
+                    resp = future.result(timeout=config_manager.config.model_timeout)
+                except Exception as exc:  # noqa: BLE001
+                    resp = f"[警告] 对话生成失败：{exc}"
+                signals.chat_done.emit(text, resp)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def trigger_upgrade() -> None:
             target = upgrade_input.text().strip() or "提升推理与自愈能力"
             status_label.setText("状态：升级推演中...")
             QtWidgets.QApplication.processEvents()
-            plan_future = asyncio.run_coroutine_threadsafe(self.evolution.draft_upgrade(target), self.loop)
-            plan = plan_future.result()
-            code = self.evolution.materialize_code(target)
-            upgrade_output.append(f"[思考] {plan}\n[代码草案]\n{code}\n")
-            behavior_view.append(f"[升级] 目标：{target} | 已生成思路与代码草案")
-            status_label.setText("状态：空闲")
+
+            def worker() -> None:
+                try:
+                    plan_future = asyncio.run_coroutine_threadsafe(self.evolution.draft_upgrade(target), self.loop)
+                    plan = plan_future.result(timeout=config_manager.config.model_timeout)
+                except Exception as exc:  # noqa: BLE001
+                    plan = f"[警告] 升级思路生成失败：{exc}"
+                try:
+                    code = self.evolution.materialize_code(target)
+                except Exception as exc:  # noqa: BLE001
+                    code = f"# 生成代码失败：{exc}"
+                signals.upgrade_done.emit(target, plan, code)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         send_btn.clicked.connect(send_message)  # type: ignore
         upgrade_btn.clicked.connect(trigger_upgrade)  # type: ignore
