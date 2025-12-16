@@ -799,7 +799,12 @@ class Interface:
 
         logger.log("[信息] 正在启动可视化窗口，请稍候……")
 
-        app = QtWidgets.QApplication(sys.argv)
+        try:
+            app = QtWidgets.QApplication(sys.argv)
+        except Exception as exc:  # noqa: BLE001
+            logger.log(f"[错误] 创建 Qt 应用失败：{exc}，可能缺少图形环境，请在有桌面的环境重试。")
+            return
+
         window = QtWidgets.QWidget()
         window.setWindowTitle("类人智能体监控与升级演示")
 
@@ -970,12 +975,16 @@ class RemoteUpgradeWatcher:
 def main() -> None:
     dm = DependencyManager(auto_install=True)
     dm.ensure()
-    dm.ensure_pyqt()
+    pyqt_ok = dm.ensure_pyqt()
 
     tier_params = hardware_profiler.recommended_params()
     config_manager.update(**tier_params)
     if tier_params.get("hardware_tier") == "low" and not config_manager.config.remote_endpoint:
         logger.log("[警告] 当前算力为低配且未配置远程大模型端点，建议设置 REMOTE_MODEL_ENDPOINT 以增强智能。")
+
+    if pyqt_ok and not config_manager.config.ui_enabled:
+        logger.log("[信息] 检测到 PyQt6 可用，但配置为无界面模式，已自动开启窗口模式。")
+        config_manager.update(ui_enabled=True)
 
     model_manager = ModelManager(config_manager.config)
     model_manager.start_daemon()
