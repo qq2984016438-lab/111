@@ -12,7 +12,7 @@
 
 ## 运行要求
 - **Python**：3.11
-- **运行时**：已安装 [Ollama](https://ollama.ai) 且可调用本地模型 `qwen3-vl-8b`；若暂未安装，可通过 `REMOTE_MODEL_ENDPOINT` 提供远程推理端点兜底。脚本会检测 CLI 是否存在并自动尝试拉取模型，CLI 失败时会使用 HTTP 方式检测/拉取（支持自定义 `OLLAMA_HOST`），仍失败则给出中文原因并提示远程端点方案；如提供 `REMOTE_MODEL_ENDPOINTS`（用逗号分隔）或 `REMOTE_ENDPOINT_LIST_URL`（返回端点列表的文本 URL），会自动探测并切换可用的远程大模型。
+- **运行时**：已安装 [Ollama](https://ollama.ai) 且可调用本地模型 `qwen3-vl-8b`；若暂未安装，可通过 `REMOTE_MODEL_ENDPOINT` 提供远程推理端点兜底。脚本会检测 CLI 是否存在并自动尝试拉取模型，CLI 失败时会使用 HTTP 方式检测/拉取（支持自定义 `OLLAMA_HOST`，即使包含 http:// 也会自动拆分为 CLI 可用的 host:port），仍失败则给出中文原因并提示远程端点方案；如提供 `REMOTE_MODEL_ENDPOINTS`（用逗号分隔）或 `REMOTE_ENDPOINT_LIST_URL`（返回端点列表的文本 URL），会自动探测并切换可用的远程大模型；当 CLI 推理异常时还会自动通过 HTTP `/api/generate` 兜底调用。
 - **Python 依赖**：`PyQt6`、`paho-mqtt`、`requests`，可选 `psutil`、`kivy`。脚本会在首次运行时尝试自动安装缺失依赖。
 - **系统**：Windows / Linux（确保 `ollama` 在 PATH 中；GPU 探测在有 `nvidia-smi` 时更准确）。
 

@@ -340,7 +340,12 @@ class ModelManager:
         self.remote = RemoteModelConnector(cfg.remote_endpoint)
         self._local_check_passed = False
         self._local_last_error: Optional[str] = None
-        self._ollama_host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+        raw_host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip().rstrip("/")
+        # CLI 期望 host:port，HTTP 需要协议，拆分后统一复用
+        if raw_host.startswith("http://") or raw_host.startswith("https://"):
+            raw_host = raw_host.split("://", 1)[1]
+        self._ollama_host = raw_host or "127.0.0.1:11434"
+        self._http_host = f"http://{self._ollama_host}"
 
     def _cli_env(self) -> Dict[str, str]:
         env = {**os.environ, "OLLAMA_HOST": self._ollama_host}
@@ -351,18 +356,15 @@ class ModelManager:
         if util.find_spec("requests") is None:
             return False, "缺少 requests 库"
         requests_mod = import_module("requests")  # type: ignore
-        host = self._ollama_host
-        if not host.startswith("http"):
-            host = f"http://{host}"
         try:
-            version_resp = requests_mod.get(f"{host}/api/version", timeout=5)
+            version_resp = requests_mod.get(f"{self._http_host}/api/version", timeout=5)
             if version_resp.status_code != 200:
                 return False, f"版本接口响应异常 HTTP{version_resp.status_code}"
         except Exception as exc:  # noqa: BLE001
             return False, f"HTTP 探测失败：{exc}"
 
         try:
-            tags = requests_mod.get(f"{host}/api/tags", timeout=8)
+            tags = requests_mod.get(f"{self._http_host}/api/tags", timeout=8)
             if tags.status_code == 200 and DependencyManager.OLLAMA_MODEL in tags.text:
                 return True, "HTTP 确认模型已存在"
         except Exception:
@@ -371,7 +373,7 @@ class ModelManager:
         try:
             logger.log("[信息] 通过 HTTP 触发模型拉取...")
             pull_resp = requests_mod.post(
-                f"{host}/api/pull",
+                f"{self._http_host}/api/pull",
                 json={"name": DependencyManager.OLLAMA_MODEL},
                 timeout=30,
             )
@@ -522,13 +524,44 @@ class ModelManager:
                 stderr_msg = exc.stderr.strip() if exc.stderr else ""
                 if stderr_msg:
                     output += f" | stderr: {stderr_msg}"
-            # 本地失败时再做一次远程兜底
-            fallback = self._try_remote(prompt, retries=2)
-            if fallback:
-                output = fallback
+            http_retry = self._http_generate(prompt)
+            if http_retry:
+                output = http_retry
+            else:
+                # 本地失败时再做一次远程兜底
+                fallback = self._try_remote(prompt, retries=2)
+                if fallback:
+                    output = fallback
         if self.cfg.cache_enabled:
             model_cache.set(prompt, output)
         return output
+
+    def _http_generate(self, prompt: str) -> Optional[str]:
+        """当 CLI 推理失败时，通过 HTTP 接口兜底调用 generate。"""
+        if util.find_spec("requests") is None:
+            return None
+        requests_mod = import_module("requests")  # type: ignore
+        try:
+            resp = requests_mod.post(
+                f"{self._http_host}/api/generate",
+                json={
+                    "model": DependencyManager.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "num_ctx": self.cfg.context_size,
+                        "num_thread": self.cfg.num_threads,
+                    },
+                },
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return str(data.get("response") or data).strip()
+            logger.log(f"[警告] HTTP 调用 generate 失败：HTTP{resp.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            logger.log(f"[警告] HTTP 调用 generate 异常：{exc}")
+        return None
 
 
 # --------------------------- 核心能力模块 ---------------------------
