@@ -395,7 +395,6 @@ class RemoteModelConnector:
                         self.crawl_public_endpoints()
                         self.auto_discover()
         return None
-        return None
 
 
 # --------------------------- 模型管理 ---------------------------
@@ -791,6 +790,9 @@ class Interface:
                 logger.log("[错误] 窗口依赖不可用，已进入无界面模式。")
                 return
 
+        if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
+            logger.log("[警告] 当前无可用图形显示（缺少 DISPLAY 环境变量），窗口可能无法弹出，建议在图形桌面下运行。")
+
         try:
             from PyQt6 import QtWidgets, QtGui  # type: ignore
         except Exception as exc:  # noqa: BLE001
@@ -895,7 +897,15 @@ class Interface:
         if not config_manager.config.ui_enabled:
             window.setWindowOpacity(0.9)
             window.setStyleSheet("background-color: #222; color: #ddd;")
-        sys.exit(app.exec())
+        try:
+            app.processEvents()
+            exit_code = app.exec()
+            logger.log(f"[信息] 窗口已关闭，Qt 退出码：{exit_code}")
+        except SystemExit:
+            # 避免 SystemExit 直接终止主线程，确保后续清理执行
+            logger.log("[警告] Qt 主循环触发退出信号，准备进行资源清理。")
+        except Exception as exc:  # noqa: BLE001
+            logger.log(f"[错误] Qt 主循环异常：{exc}")
 
 
 # --------------------------- 自检测试 ---------------------------
