@@ -149,6 +149,7 @@ class Config:
     ui_enabled: bool = True
     cache_enabled: bool = True
     async_inference: bool = True
+    model_timeout: int = 60
     remote_endpoint: str = os.environ.get("REMOTE_MODEL_ENDPOINT", "")
 
 
