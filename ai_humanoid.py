@@ -583,11 +583,19 @@ class ModelManager:
         if cached:
             return cached
         # 本地不可用或低配算力优先尝试远程模型
-        if self.cfg.hardware_tier == "low" or not self._local_ready():
+        local_ready = self._local_ready()
+        if self.cfg.hardware_tier == "low" or not local_ready:
             remote_resp = self._try_remote(prompt, retries=5)
             if remote_resp:
                 return remote_resp
-            if not self._local_ready():
+            # 在本地自检失败时也尝试 HTTP 直连，避免误判导致直接报错
+            http_try = self._http_generate(prompt)
+            if http_try:
+                logger.log("[信息] 本地 CLI 自检失败但 HTTP 推理成功，已标记本地可用。")
+                self._local_check_passed = True
+                self._local_last_error = None
+                return http_try
+            if not local_ready:
                 missing_reason = self._local_last_error or "未知原因"
                 return (
                     "【模型不可用】本地推理未就绪："
