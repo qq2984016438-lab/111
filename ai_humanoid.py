@@ -612,10 +612,19 @@ class ModelManager:
                 capture_output=True,
                 check=True,
                 env=env,
+                timeout=max(10, self.cfg.model_timeout),
             )
             output = process.stdout.strip()
             if not output:
                 output = process.stderr.strip() or "【模型无返回内容】"
+        except subprocess.TimeoutExpired:
+            logger.log("[警告] 本地推理超时，正在尝试 HTTP 与远程兜底……")
+            http_retry = self._http_generate(prompt)
+            if http_retry:
+                output = http_retry
+            else:
+                fallback = self._try_remote(prompt, retries=3)
+                output = fallback or "【模型不可用】本地推理超时且远程兜底失败。"
         except FileNotFoundError:
             logger.log("[错误] 未找到 Ollama 可执行文件，尝试切换远程推理。")
             fallback = self._try_remote(prompt, retries=5)
@@ -637,6 +646,17 @@ class ModelManager:
                 fallback = self._try_remote(prompt, retries=2)
                 if fallback:
                     output = fallback
+        if output in ("", "【模型无返回内容】"):
+            logger.log("[警告] 本地推理返回为空，尝试 HTTP/远程兜底……")
+            http_retry = self._http_generate(prompt)
+            if http_retry:
+                output = http_retry
+            else:
+                fallback = self._try_remote(prompt, retries=3)
+                if fallback:
+                    output = fallback
+                else:
+                    output = "【模型无返回内容】请检查 Ollama 日志或配置 REMOTE_MODEL_ENDPOINT。"
         if self.cfg.cache_enabled:
             model_cache.set(prompt, output)
         return output
@@ -658,7 +678,7 @@ class ModelManager:
                         "num_thread": self.cfg.num_threads,
                     },
                 },
-                timeout=60,
+                timeout=max(10, self.cfg.model_timeout),
             )
             if resp.status_code == 200:
                 data = resp.json()
