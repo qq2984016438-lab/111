@@ -305,6 +305,8 @@ class RemoteModelConnector:
                     self.endpoint = candidate
                     logger.log(f"[信息] 已切换远程端点：{candidate}")
                     break
+        if not self.endpoint:
+            logger.log("[警告] 暂未发现可用远程端点，将持续爬取与切换以补强算力。")
         return bool(self.endpoint)
 
     def auto_discover(self) -> None:
@@ -369,17 +371,18 @@ class RemoteModelConnector:
         test = self.fetch("PING", retries=1)
         return bool(test)
 
-    def fetch(self, prompt: str, retries: int = 3) -> Optional[str]:
+    def fetch(self, prompt: str, retries: int = 3, timeout: int = 12) -> Optional[str]:
         if not self.ready():
             return None
         assert self.session is not None
+        start = time.time()
         for attempt in range(1, retries + 1):
             try:
                 logger.log(f"[信息] 正在通过远程模型尝试推理（第 {attempt} 次）...")
                 resp = self.session.post(
                     self.endpoint,
                     json={"prompt": prompt},
-                    timeout=15,
+                    timeout=max(5, min(timeout, 25)),
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -389,6 +392,9 @@ class RemoteModelConnector:
                 logger.log(f"[警告] 远程模型响应异常：HTTP {resp.status_code}")
             except Exception as exc:  # noqa: BLE001
                 logger.log(f"[警告] 远程模型尝试失败：{exc}，继续重试...")
+                if time.time() - start > timeout:
+                    logger.log("[警告] 远程模型总体耗时过长，提前切换其他端点。")
+                    break
                 if attempt == retries:
                     self.endpoint = ""
                     self.auto_discover()
@@ -411,6 +417,8 @@ class ModelManager:
         self._active_model = self._model_candidates[0]
         self._local_check_passed = False
         self._local_last_error: Optional[str] = None
+        self._last_local_check: float = 0.0
+        self._local_retry_interval: int = 30
         raw_host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip().rstrip("/")
         # CLI 期望 host:port，HTTP 需要协议，拆分后统一复用
         if raw_host.startswith("http://") or raw_host.startswith("https://"):
@@ -463,6 +471,11 @@ class ModelManager:
         """检查本地 Ollama 可用性。"""
         if self._local_check_passed:
             return True
+        now = time.time()
+        if self._local_last_error and now - self._last_local_check < self._local_retry_interval:
+            logger.log("[信息] 本地模型短时间内已检查失败，使用上次结果以避免卡顿。")
+            return False
+        self._last_local_check = now
         if shutil.which("ollama") is None:
             self._local_last_error = "未检测到 Ollama CLI"
             logger.log("[警告] 未检测到 Ollama CLI，优先尝试远程模型或请安装后重启。")
@@ -527,7 +540,7 @@ class ModelManager:
     def _try_remote(self, prompt: str, retries: int = 3) -> Optional[str]:
         if not self.remote.ready():
             return None
-        remote_resp = self.remote.fetch(prompt, retries=retries)
+        remote_resp = self.remote.fetch(prompt, retries=retries, timeout=min(self.cfg.model_timeout, 20))
         if remote_resp and self.cfg.cache_enabled:
             model_cache.set(prompt, remote_resp)
         return remote_resp
