@@ -123,12 +123,24 @@ class DependencyManager:
 
     def _ensure_model(self) -> None:
         try:
-            result = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
             if not any(alias in result.stdout for alias in self.OLLAMA_MODEL_ALIASES):
                 for alias in self.OLLAMA_MODEL_ALIASES:
                     logger.log(f"[信息] 正在尝试拉取本地模型 {alias} ...")
                     pull = subprocess.run(
-                        ["ollama", "pull", alias], capture_output=True, text=True, check=False
+                        ["ollama", "pull", alias],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        encoding="utf-8",
+                        errors="ignore",
                     )
                     if pull.returncode == 0:
                         logger.log(f"[信息] 模型 {alias} 已就绪或已缓存。")
@@ -286,6 +298,21 @@ class RemoteModelConnector:
         if util.find_spec("requests"):
             self.session = import_module("requests")  # type: ignore
 
+    @staticmethod
+    def _safe_text(resp: Any) -> str:
+        """宽松解码远程响应，避免在 Windows 下因编码不一致导致崩溃。"""
+        try:
+            if not getattr(resp, "encoding", None):
+                resp.encoding = getattr(resp, "apparent_encoding", None) or "utf-8"
+            else:
+                resp.encoding = resp.encoding or getattr(resp, "apparent_encoding", None) or "utf-8"
+            return resp.text
+        except Exception:
+            try:
+                return resp.content.decode(getattr(resp, "apparent_encoding", "utf-8") or "utf-8", errors="ignore")
+            except Exception:
+                return resp.content.decode("utf-8", errors="ignore")
+
     def ready(self) -> bool:
         if self.session is None:
             return False
@@ -318,7 +345,8 @@ class RemoteModelConnector:
                 logger.log("[信息] 正在抓取远程端点列表，用于补强推理...")
                 resp = self.session.get(self.discovery_url, timeout=8)
                 if resp.status_code == 200:
-                    lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
+                    text = self._safe_text(resp)
+                    lines = [line.strip() for line in text.splitlines() if line.strip()]
                     self.backup_endpoints.extend(lines)
                     logger.log(f"[信息] 已从远程列表获取 {len(lines)} 个候选端点。")
                 else:
@@ -345,7 +373,8 @@ class RemoteModelConnector:
                 if resp.status_code >= 500:
                     logger.log(f"[警告] 爬取 {seed} 失败：HTTP{resp.status_code}")
                     continue
-                urls = re.findall(r"https?://[^\s\"']+", resp.text)
+                text = self._safe_text(resp)
+                urls = re.findall(r"https?://[^\s\"']+", text)
                 filtered = [u for u in urls if any(key in u.lower() for key in ("api", "chat", "infer", "model", "v1"))]
                 new_candidates = [u for u in filtered if u not in self._seen_candidates]
                 for cand in new_candidates:
@@ -384,9 +413,10 @@ class RemoteModelConnector:
                     json={"prompt": prompt},
                     timeout=max(5, min(timeout, 25)),
                 )
+                resp.encoding = getattr(resp, "apparent_encoding", None) or resp.encoding or "utf-8"
                 if resp.status_code == 200:
                     data = resp.json()
-                    result = data.get("reply") or data.get("text") or resp.text
+                    result = data.get("reply") or data.get("text") or self._safe_text(resp)
                     logger.log("[信息] 远程模型返回结果。")
                     return str(result).strip()
                 logger.log(f"[警告] 远程模型响应异常：HTTP {resp.status_code}")
@@ -482,7 +512,14 @@ class ModelManager:
             return False
         try:
             result = subprocess.run(
-                ["ollama", "list"], capture_output=True, text=True, check=True, env=self._cli_env(), timeout=20
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=self._cli_env(),
+                timeout=20,
+                encoding="utf-8",
+                errors="ignore",
             )
             if not any(alias in result.stdout for alias in self._model_candidates):
                 self._local_last_error = "本地缺少 qwen3-vl 系列模型"
@@ -496,6 +533,8 @@ class ModelManager:
                         check=False,
                         env=self._cli_env(),
                         timeout=120,
+                        encoding="utf-8",
+                        errors="ignore",
                     )
                     if pull.returncode == 0:
                         self._active_model = alias
@@ -505,7 +544,14 @@ class ModelManager:
                     logger.log(f"[警告] 拉取 {alias} 失败：{pull.stderr.strip()}")
                 if pulled_ok:
                     result = subprocess.run(
-                        ["ollama", "list"], capture_output=True, text=True, check=False, env=self._cli_env(), timeout=30
+                        ["ollama", "list"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=self._cli_env(),
+                        timeout=30,
+                        encoding="utf-8",
+                        errors="ignore",
                     )
                 if not any(alias in result.stdout for alias in self._model_candidates):
                     ok, reason = self._ping_ollama_http()
@@ -621,6 +667,8 @@ class ModelManager:
                 check=True,
                 env=env,
                 timeout=max(10, self.cfg.model_timeout),
+                encoding="utf-8",
+                errors="ignore",
             )
             output = process.stdout.strip()
             if not output:
@@ -689,7 +737,14 @@ class ModelManager:
                 timeout=max(10, self.cfg.model_timeout),
             )
             if resp.status_code == 200:
-                data = resp.json()
+                resp.encoding = getattr(resp, "apparent_encoding", None) or resp.encoding or "utf-8"
+                try:
+                    data = resp.json()
+                except Exception:
+                    try:
+                        data = json.loads(resp.content.decode(resp.encoding or "utf-8", errors="ignore"))
+                    except Exception:
+                        data = {"response": self.remote._safe_text(resp) if self.remote else resp.text}
                 return str(data.get("response") or data).strip()
             logger.log(f"[警告] HTTP 调用 generate 失败：HTTP{resp.status_code}")
         except Exception as exc:  # noqa: BLE001
